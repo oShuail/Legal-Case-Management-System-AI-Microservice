@@ -1,1 +1,1 @@
-# Legal-Case-Management-System-AI-icroservice
+# Legal-Case-Management-System-AI-Microservice
