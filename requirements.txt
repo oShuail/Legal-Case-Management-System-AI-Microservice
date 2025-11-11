@@ -1,6 +1,12 @@
-```txt
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-pydantic==2.10.6
-pydantic-settings==2.7.1
-loguru==0.7.3
+# FastAPI web framework
+fastapi>=0.111,<1.0
+
+# ASGI server; 
+uvicorn[standard]>=0.30,<1.0
+
+# Typed settings from env/.env
+pydantic>=2.6,<3.0
+pydantic-settings>=2.2,<3.0
+
+# Simple structured logging
+loguru>=0.7,<1.0
