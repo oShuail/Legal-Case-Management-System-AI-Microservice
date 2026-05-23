@@ -43,12 +43,37 @@ class EmbeddingService:
         self._cache_size = max(64, int(settings.hf_embed_cache_size))
         self._hf_provider_order = self._resolve_hf_provider_order()
 
+        # ---- Provider-health state ----
+        # Tracked so the frontend can show a friendly "AI warming up" banner
+        # whenever the local BGE fallback has to be loaded or is currently
+        # serving requests (instead of the fast hosted endpoint).
+        #
+        # local_model_state: "not_loaded" | "loading" | "ready"
+        # last_provider:     name of the provider that served the most recent
+        #                    successful embed call ("endpoint" | "serverless"
+        #                    | "bge" | "fake" | None)
+        # fallback_active:   True when last_provider == "bge" AND provider
+        #                    config is "hf" (i.e. we're on the backup model).
+        self._local_model_state: str = "not_loaded"
+        self._last_provider: str | None = None
+        self._fallback_active: bool = False
+
+        # Remember constructor args so a lazy fallback load can use the same.
+        self._init_model_name = model_name
+        self._init_device = device
+
         if self.provider == "bge":
+            # Primary provider is local BGE — load it now, it'll be hit on
+            # every request.
             self._init_local_bge_model(model_name=model_name, device=device)
 
-        if self.provider == "hf" and "bge" in self._hf_provider_order:
-            # Pre-load local fallback once so fallback is fast if invoked.
-            self._init_local_bge_model(model_name=model_name, device=device)
+        # When provider == "hf", DO NOT eagerly load the local BGE fallback.
+        # The local BGE-M3 model weighs ~6-8 GB of RAM with sentence-
+        # transformers + torch, and the remote HF endpoint covers 99%+ of
+        # requests. The fallback path at line ~229 already calls
+        # `_init_local_bge_model()` lazily on first invocation (and that
+        # method is idempotent), so we keep the same correctness guarantee
+        # without paying the startup memory cost.
 
     def _init_local_bge_model(
         self,
@@ -56,6 +81,7 @@ class EmbeddingService:
         device: str | None = None,
     ) -> None:
         if self.model is not None:
+            self._local_model_state = "ready"
             return
         if SentenceTransformer is None:
             raise ImportError(
@@ -64,7 +90,33 @@ class EmbeddingService:
             )
         name = model_name or settings.embedding_model_name
         dev = device or settings.embedding_device
+        # Flip state to "loading" BEFORE the heavy load so a concurrent health
+        # poll sees the warming-up state and can surface it to the user.
+        self._local_model_state = "loading"
+        logger.info("Loading local BGE model lazily name={} device={}", name, dev)
         self.model = SentenceTransformer(name, device=dev)
+        self._local_model_state = "ready"
+
+    def get_health(self) -> dict:
+        """
+        Snapshot of embedding-provider health for /health/embeddings.
+
+        Designed for the UI: returns plain user-friendly flags rather than
+        internal jargon so the frontend can show a banner like
+          "AI assistant is warming up — your request will be ready shortly."
+        when fallback is loading, and
+          "AI assistant is running on the backup model."
+        when fallback is actively serving.
+        """
+        return {
+            "configured_provider": self.provider,
+            "hf_provider_order": self._hf_provider_order,
+            "local_model_state": self._local_model_state,
+            "last_provider": self._last_provider,
+            "fallback_active": self._fallback_active,
+            # `warming_up` is the single flag the UI typically watches.
+            "warming_up": self._local_model_state == "loading",
+        }
 
     def _resolve_hf_provider_order(self) -> list[str]:
         allowed = {"serverless", "endpoint", "bge"}
@@ -226,7 +278,12 @@ class EmbeddingService:
                 try:
                     provider_vectors: list[List[float]] = []
                     if provider_name == "bge":
-                        self._init_local_bge_model()
+                        # Lazy-load on first fallback. _init_local_bge_model
+                        # is idempotent so subsequent calls are no-ops.
+                        self._init_local_bge_model(
+                            model_name=self._init_model_name,
+                            device=self._init_device,
+                        )
                         for i in range(0, len(missing_texts), max_batch):
                             batch = missing_texts[i : i + max_batch]
                             raw_vectors = self.model.encode(  # type: ignore[union-attr]
@@ -263,6 +320,10 @@ class EmbeddingService:
 
             if selected_provider is None:
                 raise RuntimeError("All embedding providers failed") from last_error
+
+            # Update health state so /health/embeddings can surface to the UI.
+            self._last_provider = selected_provider
+            self._fallback_active = selected_provider == "bge"
 
             logger.info(
                 "HF embed provider selected provider={} batch_text_count={}",

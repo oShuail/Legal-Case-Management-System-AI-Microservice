@@ -149,7 +149,127 @@ Find regulations related to a case. **For backend integration.**
 - **POST `/documents/extract`** - Extract attachment text (shared parser/OCR pipeline)
 - **POST `/documents/case-insights`** - Generate case-focused summary + related snippets
 - **GET `/`** - Root endpoint
-- **GET `/health/`** - Health check
+- **GET `/health/`** - Liveness check (service is up)
+- **GET `/health/embeddings`** - Embedding-provider readiness (drives the
+  frontend "AI assistant is warming up" banner; see section below)
+
+---
+
+## 🧯 Embedding Provider Fallback & Lazy Loading
+
+The embedding service is configured with a **provider order** so a single
+hosted-endpoint outage doesn't take AI features down. The order is read from
+`HF_EMBED_PROVIDER_ORDER` (default: `["endpoint", "serverless", "bge"]`):
+
+| # | Provider                | What it is                                                                                       | Why                              |
+| - | ----------------------- | ------------------------------------------------------------------------------------------------ | -------------------------------- |
+| 1 | `endpoint`              | Dedicated HF Inference Endpoint serving the fine-tuned `devSaleh/BGE-M3-Saudi-Legal-Cases-regulations` model. | Primary. Fast, scalable, paid.   |
+| 2 | `serverless`            | HF serverless inference API for the same model.                                                  | Secondary. Cheaper, rate-limited. |
+| 3 | `bge`                   | Local `sentence-transformers` BGE-M3 loaded in-process.                                          | Last-resort fallback.            |
+
+### Lazy load (memory-saving)
+
+The local `bge` provider is **lazy-loaded**: it is _not_ initialised at startup
+even when listed in the provider order. The model + PyTorch + tokenizers
+weigh **6–8 GB of RAM**, and the hosted endpoint covers > 99% of requests,
+so paying that memory cost upfront is wasteful. The first time fallback is
+actually needed, `_init_local_bge_model()` is called inside the request loop
+(see [`embeddings.py`](ai_service/app/core/embeddings.py)) — it is idempotent
+so subsequent calls are no-ops. The cold load takes ~50 s on CPU. Switching
+back to eager loading just means restoring the previous unconditional call in
+`EmbeddingService.__init__`.
+
+### Health endpoint (`GET /health/embeddings`)
+
+Returns the provider state so the frontend can surface a friendly banner
+while the fallback is loading or actively serving. Sample response:
+
+```json
+{
+  "configured_provider": "hf",
+  "hf_provider_order": ["endpoint", "serverless", "bge"],
+  "local_model_state": "not_loaded",
+  "last_provider": "endpoint",
+  "fallback_active": false,
+  "warming_up": false
+}
+```
+
+| Field                 | Meaning                                                                            |
+| --------------------- | ---------------------------------------------------------------------------------- |
+| `configured_provider` | The top-level provider mode (`hf`, `bge`, `fake`).                                 |
+| `hf_provider_order`   | The active fallback chain.                                                         |
+| `local_model_state`   | `not_loaded` \| `loading` \| `ready` — drives the "warming up" message.             |
+| `last_provider`       | Which provider served the most recent successful embed call.                       |
+| `fallback_active`     | `true` when `last_provider == "bge"` while the configured provider is `hf`.        |
+| `warming_up`          | `true` while the local model is in the middle of its one-time cold load.           |
+
+### End-to-end UX flow (when the hosted endpoint goes down)
+
+```
+┌──────────────────┐  GET /api/ai/health   ┌──────────────────┐  GET /health/embeddings  ┌─────────────────┐
+│  Frontend        │ ───────────────────▶ │  Node backend    │ ────────────────────────▶ │  AI microservice │
+│  (Next.js)       │                       │  (Fastify)       │                           │  (FastAPI)       │
+│                  │ ◀─────────────────── │  5s cache,       │ ◀──────────────────────── │  reads           │
+│  <AIStatusBanner>│  {ready, warmingUp,  │  3s timeout      │  {warming_up,             │  EmbeddingService│
+│  polls every     │   fallbackActive,    │                  │   fallback_active, …}     │  state           │
+│  5s while warming│   message}           │                  │                           │                  │
+│  else 60s        │                       │                  │                           │                  │
+└──────────────────┘                       └──────────────────┘                           └─────────────────┘
+```
+
+What the user sees:
+
+1. **Normal day** — banner hidden, AI features are served by the fine-tuned
+   model on the hosted endpoint.
+2. **Hosted endpoint outage, first request** — fallback chain advances to
+   `bge`, the local model starts loading. Within ~5 s the frontend banner
+   shows: _"AI assistant is warming up — your request will be ready shortly."_
+   The user's request returns once the cold load completes (~50 s) and the
+   embedding call runs.
+3. **Subsequent requests during the outage** — local model is in RAM, so
+   they are fast. Banner switches to amber: _"AI assistant is running on the
+   backup service. Some requests may be slightly slower than usual."_
+4. **Hosted endpoint recovers** — next successful request flips
+   `last_provider` back to `endpoint`, the banner clears within ~60 s.
+
+### Files involved
+
+| Layer            | File                                                                                                    |
+| ---------------- | ------------------------------------------------------------------------------------------------------- |
+| AI microservice  | [`ai_service/app/core/embeddings.py`](ai_service/app/core/embeddings.py) — state tracking + lazy init   |
+| AI microservice  | [`ai_service/app/api/routes/health.py`](ai_service/app/api/routes/health.py) — `/health/embeddings`     |
+| Node backend     | `Legal-Case-Management-System/src/services/ai-client.service.ts` — `getEmbeddingsHealth()`              |
+| Node backend     | `Legal-Case-Management-System/src/routes/ai/index.ts` — `GET /api/ai/health` (cached 5 s)               |
+| Frontend         | `Legal_Case_Management_Website/src/lib/hooks/use-ai-health.ts` — adaptive polling                       |
+| Frontend         | `Legal_Case_Management_Website/src/components/features/ai/ai-status-banner.tsx` — banner UI             |
+| Frontend         | `Legal_Case_Management_Website/src/app/(dashboard)/layout.tsx` — mounts the banner globally             |
+
+### Tuning
+
+- **To skip the fallback entirely** (saves memory but accepts a hard failure
+  on hosted-endpoint outages): set
+  `HF_EMBED_PROVIDER_ORDER=["endpoint","serverless"]`.
+- **To eager-load the fallback** (pre-pay the ~7 GB so the first fallback
+  request is instant): restore the unconditional `_init_local_bge_model()`
+  call in `EmbeddingService.__init__`. There's a comment in that file
+  marking the spot.
+
+### Worker deployment modes (Node backend, not this service)
+
+Unrelated to embeddings but relevant to deployment: the Node backend's
+background work was split into three buckets — interactive (sync HTTP),
+scheduled cron, and real async extraction. You can deploy in two modes:
+
+| Mode               | Pods | Run command                                  | When to use                                            |
+| ------------------ | ---- | -------------------------------------------- | ------------------------------------------------------ |
+| **Combined**       | 1    | `npm run worker` (or `dist/workers/combined.worker.js`) | Default. Small/medium load. Cheapest.                |
+| **Split**          | 2    | `npm run worker:scheduler` + `npm run worker:extraction` | When extraction volume justifies horizontal scaling. |
+
+The split mode is safe to flip on at any time: `runPendingExtractions`
+already uses `SELECT ... FOR UPDATE SKIP LOCKED` so multiple extraction
+pods grab disjoint row sets without races. The scheduler stays at one pod
+because it holds a Postgres advisory lock for subscription runs.
 
 ---
 
