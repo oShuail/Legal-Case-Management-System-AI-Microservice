@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
+from app.errors.handlers import register_exception_handlers
 from app.api.routes import (
     health,
     embeddings,
@@ -31,6 +32,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Canonical error envelope handlers — produces the same shape as the Node backend.
+register_exception_handlers(app)
 
 
 @app.get("/")

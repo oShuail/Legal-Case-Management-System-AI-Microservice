@@ -24,6 +24,8 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
+from app.errors import AICode, AIError
+
 from app.api.schemas.requests import CaseFragment, FindRelatedRequest
 from app.api.schemas.responses import (
     FindRelatedResponse,
@@ -456,12 +458,10 @@ async def find_related_regulations(payload: FindRelatedRequest) -> FindRelatedRe
         t_start = time.perf_counter()
 
         if not payload.case_text or not payload.case_text.strip():
-            raise HTTPException(status_code=400, detail="case_text cannot be empty")
+            raise AIError(AICode.INPUT_INVALID, "case_text cannot be empty")
 
         if not payload.regulations:
-            raise HTTPException(
-                status_code=400, detail="regulations list cannot be empty"
-            )
+            raise AIError(AICode.INPUT_INVALID, "regulations list cannot be empty")
 
         user_fragments = [
             fragment
@@ -1243,14 +1243,14 @@ async def find_related_regulations(payload: FindRelatedRequest) -> FindRelatedRe
                 "score_stats": score_stats,
             },
         )
-    except HTTPException:
+    except (AIError, HTTPException):
         raise
     except Exception as error:
         logger.error(
             f"Error finding related regulations: {str(error)}",
             extra={"error_type": type(error).__name__},
         )
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to find related regulations: {str(error)}",
+        raise AIError(
+            AICode.INTERNAL,
+            f"Failed to find related regulations: {str(error)}",
         )
