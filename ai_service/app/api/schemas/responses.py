@@ -212,3 +212,65 @@ class RegulationAmendmentImpactResponse(BaseModel):
     method: str = "regulation_amendment_impact_v1"
     warnings: List[str] = []
     error_code: Optional[str] = None
+
+
+# ── Admin AI intelligence ─────────────────────────────────────────────────────
+
+
+class CaseRiskEvidence(BaseModel):
+    signal: str          # machine key, e.g. "overdue_hearing"
+    label: str           # human-readable (Arabic) label
+    severity: str        # "critical" | "high" | "medium" | "low" | "info"
+    contribution: int    # points this signal added to the score
+    detail: Optional[str] = None
+
+
+class CaseRiskRecommendedAction(BaseModel):
+    action: str          # machine key, e.g. "assign_owner"
+    label: str
+    target: Optional[str] = None  # deep-link hint: "case" | "linking" | "documents" | "lawyer"
+
+
+class CaseRiskProfileResponse(BaseModel):
+    status: str = "ok"
+    case_id: int
+    score: int = 0
+    urgency: str = "low"        # "critical" | "high" | "medium" | "low"
+    confidence: str = "medium"  # "high" | "medium" | "low"
+    signals: List[str] = []     # keys of signals that fired
+    evidence: List[CaseRiskEvidence] = []
+    recommended_actions: List[CaseRiskRecommendedAction] = []
+    rationale: Optional[str] = None  # optional LLM narrative
+    method: str = "heuristic_risk_v1"
+    warnings: List[str] = []
+    error_code: Optional[str] = None
+
+
+class OrgIntelligenceSummaryResponse(BaseModel):
+    status: str = "ok"
+    headline: str = ""
+    bullets: List[str] = []
+    aggregate_risk: dict = {}
+    workload_signals: dict = {}
+    confidence: str = "medium"
+    method: str = "heuristic_org_summary_v1"
+    warnings: List[str] = []
+    error_code: Optional[str] = None
+
+
+class ReviewPrioritizationItem(BaseModel):
+    case_id: int
+    case_number: Optional[str] = None
+    title: Optional[str] = None
+    priority_score: float = 0.0
+    unverified_links: int = 0
+    reasons: List[str] = []
+
+
+class ReviewPrioritizationResponse(BaseModel):
+    status: str = "ok"
+    items: List[ReviewPrioritizationItem] = []
+    method: str = "heuristic_review_priority_v1"
+    confidence: str = "high"
+    warnings: List[str] = []
+    error_code: Optional[str] = None

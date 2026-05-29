@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import json
 import re
 from difflib import SequenceMatcher
 from typing import Any
 
-import httpx
 from fastapi import APIRouter
 
 from app.api.schemas.requests import (
@@ -20,7 +18,7 @@ from app.api.schemas.responses import (
     RegulationSummaryAnalysisResponse,
 )
 from app.config import settings
-from app.utils.logger import logger
+from app.core.llm_json import try_llm_json
 
 router = APIRouter()
 
@@ -207,36 +205,6 @@ def _build_bullets(sentences: list[str], title: str, limit: int) -> list[Regulat
     return output
 
 
-def _extract_json_object(raw_text: str) -> dict[str, Any] | None:
-    if not raw_text:
-        return None
-
-    text = raw_text.strip()
-    text = re.sub(r"^```json\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"^```", "", text)
-    text = re.sub(r"```$", "", text)
-    text = text.strip()
-
-    try:
-        value = json.loads(text)
-        if isinstance(value, dict):
-            return value
-    except Exception:
-        pass
-
-    start = text.find("{")
-    end = text.rfind("}")
-    if start >= 0 and end > start:
-        try:
-            value = json.loads(text[start : end + 1])
-            if isinstance(value, dict):
-                return value
-        except Exception:
-            return None
-
-    return None
-
-
 def _coerce_bullets(raw: Any, default_title: str, limit: int) -> list[RegulationInsightBullet]:
     if not isinstance(raw, list):
         return []
@@ -312,59 +280,6 @@ def _coerce_citations(raw: Any, limit: int) -> list[RegulationCitation]:
     return output
 
 
-async def _try_llm_json(
-    *,
-    system_prompt: str,
-    user_payload: dict[str, Any],
-    timeout_seconds: float,
-) -> tuple[dict[str, Any] | None, str | None]:
-    if settings.llm_provider.lower() in {"", "heuristic", "none", "disabled"}:
-        return None, "llm_disabled"
-    if not settings.llm_base_url or not settings.llm_model:
-        return None, "llm_not_configured"
-
-    url = settings.llm_base_url.rstrip("/") + "/chat/completions"
-    headers: dict[str, str] = {
-        "Content-Type": "application/json",
-    }
-    if settings.llm_api_key:
-        headers["Authorization"] = f"Bearer {settings.llm_api_key}"
-
-    payload = {
-        "model": settings.llm_model,
-        "temperature": 0,
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
-        ],
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
-            response = await client.post(url, headers=headers, json=payload)
-        if response.status_code >= 400:
-            return None, f"llm_http_{response.status_code}"
-
-        body = response.json()
-        content = (
-            body.get("choices", [{}])[0]
-            .get("message", {})
-            .get("content", "")
-        )
-        parsed = _extract_json_object(content)
-        if not parsed:
-            return None, "llm_invalid_json"
-
-        return parsed, None
-    except Exception as exc:
-        logger.warning(
-            "LLM structured generation failed",
-            extra={"error": str(exc)},
-        )
-        return None, "llm_request_failed"
-
-
 @router.post(
     "/regulations/summary-analysis", response_model=RegulationSummaryAnalysisResponse
 )
@@ -424,7 +339,7 @@ async def regulation_summary_analysis(
     warnings: list[str] = []
     method = "heuristic_structured_v1"
 
-    llm_result, llm_error = await _try_llm_json(
+    llm_result, llm_error = await try_llm_json(
         system_prompt=(
             "أنت محلل قانوني متخصص. أرجع JSON فقط بالمفاتيح التالية:\n"
             "- summary: ملخص تنفيذي موجز للنظام (فقرة واحدة).\n"
@@ -585,7 +500,7 @@ async def regulation_amendment_impact(
         warnings.append("التغييرات النصية طفيفة جداً بين النسختين.")
 
     method = "heuristic_structured_v1"
-    llm_result, llm_error = await _try_llm_json(
+    llm_result, llm_error = await try_llm_json(
         system_prompt=(
             "أنت محلل تشريعي متخصص في مقارنة النصوص القانونية. أرجع JSON فقط بالمفاتيح التالية:\n"
             "- what_changed: قائمة من البنود، كل بند له:\n"

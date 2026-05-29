@@ -180,3 +180,80 @@ class RegulationAmendmentImpactRequest(BaseModel):
     diff_summary: Optional[dict] = None
     language_code: str = "ar"
     max_source_chars: int = 40000
+
+
+# ── Admin AI intelligence ─────────────────────────────────────────────────────
+# The backend assembles these numeric/boolean signals from DB state (reusing the
+# command-center queries) and posts them here. The microservice owns the
+# deterministic scoring so it is unit-testable in isolation.
+
+
+class CaseRiskSignalInput(BaseModel):
+    """Per-case signals assembled by the backend from DB state."""
+
+    overdue_hearing: bool = False
+    days_overdue: int = 0
+    hearing_this_week: bool = False
+    stale: bool = False
+    days_stale: int = 0
+    stale_threshold_days: int = 14
+    unassigned: bool = False
+    unverified_links: int = 0
+    recent_regulation_update: bool = False
+    document_risk: bool = False
+    failed_extraction: bool = False
+    lawyer_overloaded: bool = False
+    has_activity: bool = True
+    has_documents: bool = True
+
+
+class CaseRiskProfileRequest(BaseModel):
+    case_id: int
+    case_number: Optional[str] = None
+    title: Optional[str] = None
+    case_type: Optional[str] = None
+    signals: CaseRiskSignalInput = Field(default_factory=CaseRiskSignalInput)
+    ai_healthy: bool = True
+    language_code: str = "ar"
+    # Optional free text — only used for the (off-by-default) LLM narrative.
+    case_summary: Optional[str] = None
+
+
+class OrgIntelligenceCaseInput(BaseModel):
+    case_id: int
+    case_number: Optional[str] = None
+    title: Optional[str] = None
+    score: int = 0
+    urgency: str = "low"
+    top_reason: Optional[str] = None
+
+
+class OrgIntelligenceSummaryRequest(BaseModel):
+    organization_id: int
+    total_active_cases: int = 0
+    urgency_counts: dict = Field(default_factory=dict)
+    average_score: float = 0.0
+    top_cases: List[OrgIntelligenceCaseInput] = []
+    overloaded_lawyers: int = 0
+    unassigned_cases: int = 0
+    document_risk_cases: int = 0
+    regulation_impact_cases: int = 0
+    ai_healthy: bool = True
+    language_code: str = "ar"
+
+
+class ReviewPrioritizationItemInput(BaseModel):
+    case_id: int
+    case_number: Optional[str] = None
+    title: Optional[str] = None
+    unverified_links: int = 0
+    max_link_score: Optional[float] = None
+    evidence_count: int = 0
+    document_support: int = 0
+    recent_regulation_update: bool = False
+    case_risk_score: Optional[int] = None
+
+
+class ReviewPrioritizationRequest(BaseModel):
+    items: List[ReviewPrioritizationItemInput] = []
+    language_code: str = "ar"

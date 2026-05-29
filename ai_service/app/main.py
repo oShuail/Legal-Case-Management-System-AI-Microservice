@@ -16,6 +16,7 @@ from app.api.routes import (
     document_extract,
     document_insights,
     assistant,
+    admin_insights,
 )
 
 random.seed(42)
@@ -56,3 +57,4 @@ app.include_router(regulation_insights.router, tags=["regulation-insights"])
 app.include_router(document_extract.router, tags=["document-extraction"])
 app.include_router(document_insights.router, tags=["document-insights"])
 app.include_router(assistant.router, tags=["assistant"])
+app.include_router(admin_insights.router, tags=["admin-insights"])
